@@ -1,11 +1,16 @@
 -- ManualRaidOrder.lua
 -- Manual raid frame ordering for Puppeteer.
 -- Load AFTER all original addon files.
--- Uses the WoW 1.12 event/script conventions.
+-- Compatible with WoW 1.12-style script handlers.
+--
+-- Hold Alt, then drag a player onto another player with LMB.
+-- Only the visual order changes. Actual raid groups are untouched.
 
 local PT = Puppeteer
 local UF = PTUnitFrame
 local GROUP = PTUnitFrameGroup
+
+local VISUAL_GROUP_SIZE = 5
 
 local overlays = {}
 local drag = nil
@@ -38,6 +43,7 @@ local function GetOrders(create)
         if not create then
             return nil
         end
+
         PTOptions.ManualRaidOrders = {}
     end
 
@@ -59,6 +65,7 @@ end
 
 local function SaveOrder(group, order)
     local orders = GetOrders(true)
+
     if orders then
         orders[group.name] = order
     end
@@ -70,7 +77,7 @@ local function Message(text)
     )
 end
 
--- Keep the original sorting for normal operation.
+-- Preserve the original ordering until a manual order is saved.
 local OriginalGetSortedUIs = GROUP.GetSortedUIs
 
 function GROUP:GetSortedUIs()
@@ -81,6 +88,7 @@ function GROUP:GetSortedUIs()
     end
 
     local order = GetOrder(self)
+
     if not order then
         return normalGroups
     end
@@ -100,11 +108,12 @@ function GROUP:GetSortedUIs()
     end
 
     local known = {}
+
     for _, key in ipairs(order) do
         known[key] = true
     end
 
-    -- New participants are placed after previously ordered players.
+    -- Add new participants after previously ordered players.
     for _, key in ipairs(normalKeys) do
         if not known[key] then
             table.insert(order, key)
@@ -123,8 +132,21 @@ function GROUP:GetSortedUIs()
         end
     end
 
-    -- Manual order overrides visual raid subgroup splitting.
-    return {result}
+    -- Keep visual groups of five instead of one continuous group.
+    -- These groups are independent of actual raid subgroups.
+    local visualGroups = {}
+    local currentGroup
+
+    for i, ui in ipairs(result) do
+        if math.mod(i - 1, VISUAL_GROUP_SIZE) == 0 then
+            currentGroup = {}
+            table.insert(visualGroups, currentGroup)
+        end
+
+        table.insert(currentGroup, ui)
+    end
+
+    return visualGroups
 end
 
 local function SwapPlayers(group, sourceKey, targetKey)
@@ -135,7 +157,7 @@ local function SwapPlayers(group, sourceKey, targetKey)
     local order = GetOrder(group)
 
     if not order then
-        -- Capture the currently displayed order on the first swap.
+        -- Capture the visible order on the first successful swap.
         order = {}
         local seen = {}
 
@@ -150,7 +172,7 @@ local function SwapPlayers(group, sourceKey, targetKey)
             end
         end
     else
-        -- Synchronize participants before searching for positions.
+        -- Include any players who joined since the last update.
         group:GetSortedUIs()
     end
 
@@ -161,6 +183,7 @@ local function SwapPlayers(group, sourceKey, targetKey)
         if key == sourceKey then
             sourceIndex = i
         end
+
         if key == targetKey then
             targetIndex = i
         end
@@ -177,7 +200,7 @@ local function SwapPlayers(group, sourceKey, targetKey)
     group:UpdateUIPositions()
 end
 
--- Non-interactive label following the cursor.
+-- Cursor label. Does not intercept mouse input.
 local ghost = CreateFrame("Frame", nil, UIParent)
 ghost:SetFrameStrata("TOOLTIP")
 ghost:SetWidth(240)
@@ -185,11 +208,15 @@ ghost:SetHeight(24)
 ghost:EnableMouse(false)
 
 local ghostText = ghost:CreateFontString(
-    nil, "OVERLAY", "GameFontNormal"
+    nil,
+    "OVERLAY",
+    "GameFontNormal"
 )
+
 ghostText:SetAllPoints(ghost)
 ghostText:SetJustifyH("LEFT")
 ghostText:SetTextColor(1, 0.85, 0.2)
+
 ghost:Hide()
 
 local function CancelDrag()
@@ -204,6 +231,7 @@ local function UpdateGhost()
 
     local root = drag.source:GetRootContainer()
 
+    -- Unit IDs can change ownership after a roster update.
     if not root:IsVisible()
         or GetKey(drag.source) ~= drag.sourceKey then
         CancelDrag()
@@ -231,6 +259,7 @@ local function BeginDrag(ui)
     end
 
     local key = GetKey(ui)
+
     if not key then
         return
     end
@@ -248,6 +277,7 @@ end
 
 local function FinishDrag()
     local current = drag
+
     if not current then
         return
     end
@@ -269,6 +299,7 @@ local function FinishDrag()
 
     CancelDrag()
 
+    -- Dropping outside another player cancels the operation.
     if targetKey then
         SwapPlayers(
             current.group,
@@ -306,10 +337,11 @@ local function SetActive(enabled)
             ui.hovered = false
             ui:AdjustHealthPosition()
 
-            -- Keep above aura buttons and other frame decorations.
+            -- Place above aura buttons and frame decorations.
             overlay:SetFrameLevel(
                 ui.button:GetFrameLevel() + 100
             )
+
             overlay:Show()
         else
             overlay:Hide()
@@ -327,7 +359,9 @@ local function InstallOverlay(ui)
     end
 
     local overlay = CreateFrame(
-        "Frame", nil, ui:GetRootContainer()
+        "Frame",
+        nil,
+        ui:GetRootContainer()
     )
 
     ui.manualOrderOverlay = overlay
@@ -368,7 +402,7 @@ local function InstallOverlay(ui)
     end
 end
 
--- Attach the overlay after normal frame initialization.
+-- Install the input overlay after normal initialization.
 local OriginalInitialize = UF.Initialize
 
 function UF:Initialize()
@@ -376,8 +410,8 @@ function UF:Initialize()
     InstallOverlay(self)
 end
 
--- Protect against an Alt-click arriving before the next OnUpdate.
--- The original click function is otherwise unchanged.
+-- Block normal raid-frame actions while Alt is reserved for dragging.
+-- Also protects against clicks arriving before the next OnUpdate.
 local OriginalUnitFrameOnClick = PT.UnitFrame_OnClick
 
 function PT.UnitFrame_OnClick(button, unit, ui)
@@ -395,7 +429,7 @@ local watcher = CreateFrame("Frame")
 watcher:SetScript("OnUpdate", function()
     local altDown = IsAltKeyDown() and true or false
 
-    -- If Alt is released first, retain mouse capture until release.
+    -- Retain the overlay if Alt is released before the mouse button.
     local shouldEnable = altDown or drag ~= nil
 
     SetActive(shouldEnable)
@@ -405,16 +439,16 @@ watcher:SetScript("OnUpdate", function()
     end
 end)
 
--- A roster change can reassign raid1, raid2, etc.
--- Cancel a pending operation rather than moving the wrong player.
+-- Cancel pending operations when the roster changes.
 watcher:RegisterEvent("RAID_ROSTER_UPDATE")
 watcher:RegisterEvent("PLAYER_ENTERING_WORLD")
+
 watcher:SetScript("OnEvent", function()
     CancelDrag()
 end)
 
--- Optional command: reset saved ordering.
--- Not required for normal rearrangement.
+-- Optional reset command.
+-- No commands are required for normal drag-and-drop.
 SLASH_PTRAIDRESET1 = "/ptraidreset"
 
 SlashCmdList["PTRAIDRESET"] = function()
@@ -427,6 +461,7 @@ SlashCmdList["PTRAIDRESET"] = function()
             if orders then
                 orders[group.name] = nil
             end
+
             group:UpdateUIPositions()
         end
     end
