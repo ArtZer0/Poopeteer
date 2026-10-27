@@ -94,3 +94,5 @@ libs\AuraTracker.lua
 libs\PTUnit.lua
 libs\ShaguUtil.lua
 libs\HealPredict.lua
+
+ManualRaidOrder.lua
